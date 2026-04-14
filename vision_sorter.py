@@ -2,13 +2,10 @@ import cv2
 import numpy as np
 import serial
 import time
+from datetime import datetime
 
 # ----------------------------
 # Serial config
-# Update port if needed
-# Common Pi port examples:
-# /dev/ttyACM0
-# /dev/ttyUSB0
 # ----------------------------
 SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
@@ -21,15 +18,248 @@ FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
 
 # ----------------------------
-# Detection area thresholds
+# Detection thresholds
 # ----------------------------
 MIN_CONTOUR_AREA = 1500
+MAX_SELECTABLE_OBJECTS = 9
+
+
+def add_log(message: str) -> None:
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}")
+
+
+def connect_to_arduino():
+    try:
+        add_log(f"Opening serial on {SERIAL_PORT} at {BAUD_RATE} baud")
+        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+
+        time.sleep(2)
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
+
+        add_log("Testing Arduino connection")
+        ser.write(b"HOME\n")
+        time.sleep(1)
+
+        replies = []
+        start_time = time.time()
+        while time.time() - start_time < 2:
+            if ser.in_waiting > 0:
+                line = ser.readline().decode("utf-8", errors="ignore").strip()
+                if line:
+                    replies.append(line)
+
+        if replies:
+            for reply in replies:
+                add_log(f"Arduino: {reply}")
+        else:
+            add_log("WARNING: No reply from Arduino")
+
+        return ser
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to connect to Arduino: {e}")
+
+
+def send_command(ser, command: str, detected_colour="UNKNOWN", detected_shape="UNKNOWN",
+                 object_id=None, pickup_zone="UNKNOWN") -> None:
+    add_log(f"Sending command: {command}")
+
+    if object_id is not None:
+        add_log(f"Selected object ID: {object_id}")
+
+    if command.startswith("PICK_COLOR_AT"):
+        add_log(
+            f"Detected object: colour={detected_colour}, shape={detected_shape}, zone={pickup_zone}"
+        )
+        add_log("Pickup started")
+    elif command.startswith("PICK_SHAPE_AT"):
+        add_log(
+            f"Detected object: colour={detected_colour}, shape={detected_shape}, zone={pickup_zone}"
+        )
+        add_log("Pickup started")
+    elif command == "HOME":
+        add_log("Moving arm home")
+
+    ser.write((command + "\n").encode("utf-8"))
+    time.sleep(0.5)
+
+    responses = []
+    start_time = time.time()
+    while time.time() - start_time < 8:
+        if ser.in_waiting > 0:
+            line = ser.readline().decode("utf-8", errors="ignore").strip()
+            if line:
+                responses.append(line)
+                add_log(f"Arduino: {line}")
+
+                if "PICKED_UP" in line:
+                    add_log("Pickup confirmed")
+                elif "DROPPED_OFF" in line:
+                    add_log("Drop-off confirmed")
+
+    if not responses:
+        add_log("No response received from Arduino")
+
+    for response in responses:
+        if response.startswith("DONE PICK_COLOR_AT"):
+            add_log("Drop-off complete for colour sort")
+        elif response.startswith("DONE PICK_SHAPE_AT"):
+            add_log("Drop-off complete for shape sort")
+        elif response.startswith("DONE HOME"):
+            add_log("Arm returned home")
+
+
+def get_colour_masks(hsv_frame):
+    colour_ranges = {
+        "RED": [
+            ((0, 100, 80), (10, 255, 255)),
+            ((170, 100, 80), (180, 255, 255)),
+        ],
+        "BLUE": [
+            ((90, 80, 70), (130, 255, 255)),
+        ],
+    }
+
+    kernel = np.ones((5, 5), np.uint8)
+    masks = {}
+
+    for colour_name, ranges in colour_ranges.items():
+        combined_mask = None
+
+        for lower, upper in ranges:
+            lower_np = np.array(lower, dtype=np.uint8)
+            upper_np = np.array(upper, dtype=np.uint8)
+            mask = cv2.inRange(hsv_frame, lower_np, upper_np)
+
+            if combined_mask is None:
+                combined_mask = mask
+            else:
+                combined_mask = cv2.bitwise_or(combined_mask, mask)
+
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+
+        masks[colour_name] = combined_mask
+
+    return masks
+
+
+def get_valid_contours_from_mask(mask):
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return [c for c in contours if cv2.contourArea(c) > MIN_CONTOUR_AREA]
+
+
+def detect_shape(contour):
+    area = cv2.contourArea(contour)
+    perimeter = cv2.arcLength(contour, True)
+
+    if perimeter == 0:
+        return "UNKNOWN", 0, 0.0
+
+    approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
+    vertices = len(approx)
+
+    x, y, w, h = cv2.boundingRect(approx)
+    aspect_ratio = w / float(h)
+    circularity = (4 * np.pi * area) / (perimeter * perimeter)
+
+    if vertices == 3:
+        return "TRIANGLE", vertices, circularity
+
+    if vertices == 4:
+        if 0.9 <= aspect_ratio <= 1.1:
+            return "SQUARE", vertices, circularity
+        return "RECTANGLE", vertices, circularity
+
+    if circularity > 0.80:
+        return "CIRCLE", vertices, circularity
+
+    if vertices >= 5:
+        return "RECTANGLE", vertices, circularity
+
+    return "UNKNOWN", vertices, circularity
+
+
+def map_shape_to_bin_shape(raw_shape: str) -> str:
+    if raw_shape in ("SQUARE", "RECTANGLE"):
+        return "CUBE"
+    if raw_shape == "CIRCLE":
+        return "SPHERE"
+    return "UNKNOWN"
+
+
+def get_average_hue(hsv_frame, contour):
+    mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
+    cv2.drawContours(mask, [contour], -1, 255, thickness=cv2.FILLED)
+
+    hue_channel = hsv_frame[:, :, 0]
+    masked_hue = hue_channel[mask > 0]
+
+    if masked_hue.size == 0:
+        return -1.0
+
+    return float(np.mean(masked_hue))
+
+
+def get_pickup_zone(center_x: int, frame_width: int) -> str:
+    third = frame_width / 3.0
+    if center_x < third:
+        return "LEFT"
+    elif center_x < 2 * third:
+        return "CENTER"
+    return "RIGHT"
+
+
+def detect_multiple_objects(hsv_frame):
+    masks = get_colour_masks(hsv_frame)
+    detections = []
+
+    for colour_name, mask in masks.items():
+        contours = get_valid_contours_from_mask(mask)
+
+        for contour in contours:
+            raw_shape, vertices, circularity = detect_shape(contour)
+            bin_shape = map_shape_to_bin_shape(raw_shape)
+            avg_hue = get_average_hue(hsv_frame, contour)
+            area = cv2.contourArea(contour)
+            x, y, w, h = cv2.boundingRect(contour)
+
+            center_x = x + (w // 2)
+            center_y = y + (h // 2)
+            pickup_zone = get_pickup_zone(center_x, FRAME_WIDTH)
+
+            valid_colour = colour_name in ("RED", "BLUE")
+            valid_shape = bin_shape in ("CUBE", "SPHERE")
+
+            detections.append({
+                "colour": colour_name,
+                "raw_shape": raw_shape,
+                "bin_shape": bin_shape,
+                "vertices": vertices,
+                "circularity": circularity,
+                "avg_hue": avg_hue,
+                "area": area,
+                "bbox": (x, y, w, h),
+                "center": (center_x, center_y),
+                "pickup_zone": pickup_zone,
+                "contour": contour,
+                "valid": valid_colour and valid_shape,
+            })
+
+    detections.sort(key=lambda d: d["area"], reverse=True)
+
+    for idx, det in enumerate(detections, start=1):
+        det["id"] = idx
+
+    return detections
+
 
 # ----------------------------
-# Open serial
+# Connect to Arduino
 # ----------------------------
-ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-time.sleep(2)
+ser = connect_to_arduino()
 
 # ----------------------------
 # Open camera
@@ -41,157 +271,140 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
 if not cap.isOpened():
     raise RuntimeError("Could not open webcam")
 
+add_log("Camera opened successfully")
+add_log("Controls: 1-9 select object, c=sort by colour, p=shape, h=home, q=quit")
+add_log("Pickup zones: LEFT / CENTER / RIGHT")
 
-def send_command(command: str) -> None:
-    print(f"[SERIAL] Sending: {command}")
-    ser.write((command + "\n").encode("utf-8"))
-
-    # Read a response if available
-    response = ser.readline().decode("utf-8", errors="ignore").strip()
-    if response:
-        print(f"[SERIAL] Arduino: {response}")
-
-
-def detect_colour(hsv_frame, contour_mask):
-    """
-    Detect dominant colour inside the detected object region.
-    """
-    masked_hsv = cv2.bitwise_and(hsv_frame, hsv_frame, mask=contour_mask)
-
-    colour_ranges = {
-        "RED": [
-            ((0, 100, 80), (10, 255, 255)),
-            ((170, 100, 80), (180, 255, 255)),
-        ],
-        "GREEN": [
-            ((35, 70, 70), (85, 255, 255)),
-        ],
-        "BLUE": [
-            ((90, 80, 70), (130, 255, 255)),
-        ],
-        "YELLOW": [
-            ((20, 100, 100), (35, 255, 255)),
-        ],
-    }
-
-    best_colour = "UNKNOWN"
-    best_count = 0
-
-    for colour_name, ranges in colour_ranges.items():
-        total_count = 0
-        for lower, upper in ranges:
-            lower_np = np.array(lower, dtype=np.uint8)
-            upper_np = np.array(upper, dtype=np.uint8)
-            mask = cv2.inRange(masked_hsv, lower_np, upper_np)
-            total_count += cv2.countNonZero(mask)
-
-        if total_count > best_count:
-            best_count = total_count
-            best_colour = colour_name
-
-    return best_colour
-
-
-def detect_shape(contour):
-    """
-    Detect simple shape from contour polygon.
-    """
-    perimeter = cv2.arcLength(contour, True)
-    approx = cv2.approxPolyDP(contour, 0.04 * perimeter, True)
-    vertices = len(approx)
-
-    if vertices == 3:
-        return "TRIANGLE"
-    elif vertices == 4:
-        x, y, w, h = cv2.boundingRect(approx)
-        aspect_ratio = w / float(h)
-        if 0.9 <= aspect_ratio <= 1.1:
-            return "SQUARE"
-        return "RECTANGLE"
-    elif vertices > 4:
-        return "CIRCLE"
-    else:
-        return "UNKNOWN"
-
-
-def get_largest_object(frame):
-    """
-    Returns largest valid contour and its mask.
-    """
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thresh = cv2.threshold(blurred, 80, 255, cv2.THRESH_BINARY_INV)
-
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    valid = [c for c in contours if cv2.contourArea(c) > MIN_CONTOUR_AREA]
-    if not valid:
-        return None, None
-
-    largest = max(valid, key=cv2.contourArea)
-
-    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-    cv2.drawContours(mask, [largest], -1, 255, thickness=cv2.FILLED)
-
-    return largest, mask
-
-
-print("Press 's' to sort detected object")
-print("Press 'h' to send arm home")
-print("Press 'q' to quit")
-
-last_colour = "UNKNOWN"
-last_shape = "UNKNOWN"
+selected_object_id = None
+selected_detection = None
 
 while True:
     ret, frame = cap.read()
     if not ret:
-        print("Failed to read frame")
+        add_log("Failed to read frame")
         break
 
     display = frame.copy()
-    contour, contour_mask = get_largest_object(frame)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-    if contour is not None:
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        shape = detect_shape(contour)
-        colour = detect_colour(hsv, contour_mask)
+    detections = detect_multiple_objects(hsv)
 
-        last_colour = colour
-        last_shape = shape
+    selected_detection = None
+    if selected_object_id is not None:
+        for det in detections:
+            if det["id"] == selected_object_id:
+                selected_detection = det
+                break
 
-        cv2.drawContours(display, [contour], -1, (0, 255, 0), 2)
+    # Draw vertical zone guides
+    left_boundary = FRAME_WIDTH // 3
+    right_boundary = (2 * FRAME_WIDTH) // 3
+    cv2.line(display, (left_boundary, 0), (left_boundary, FRAME_HEIGHT), (100, 100, 100), 1)
+    cv2.line(display, (right_boundary, 0), (right_boundary, FRAME_HEIGHT), (100, 100, 100), 1)
 
-        x, y, w, h = cv2.boundingRect(contour)
-        label = f"{colour} {shape}"
-        cv2.putText(display, label, (x, y - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-    else:
-        cv2.putText(display, "No object detected", (20, 40),
+    cv2.putText(display, "LEFT", (30, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+    cv2.putText(display, "CENTER", (FRAME_WIDTH // 2 - 45, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+    cv2.putText(display, "RIGHT", (FRAME_WIDTH - 90, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+
+    # Draw detections
+    for det in detections[:MAX_SELECTABLE_OBJECTS]:
+        x, y, w, h = det["bbox"]
+        centre_x, centre_y = det["center"]
+        colour = det["colour"]
+        bin_shape = det["bin_shape"]
+        raw_shape = det["raw_shape"]
+        area = det["area"]
+        vertices = det["vertices"]
+        circularity = det["circularity"]
+        avg_hue = det["avg_hue"]
+        pickup_zone = det["pickup_zone"]
+        object_id = det["id"]
+        is_selected = (selected_object_id == object_id)
+
+        box_colour = (0, 255, 255) if is_selected else (0, 255, 0)
+        cv2.drawContours(display, [det["contour"]], -1, box_colour, 2)
+        cv2.rectangle(display, (x, y), (x + w, y + h), box_colour, 2)
+        cv2.circle(display, (centre_x, centre_y), 4, box_colour, -1)
+
+        label = f"ID:{object_id} {colour} {bin_shape}"
+        debug1 = f"Zone:{pickup_zone} Raw:{raw_shape}"
+        debug2 = f"V:{vertices} C:{circularity:.2f} Hue:{avg_hue:.1f}"
+
+        cv2.putText(display, label, (x, y - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, box_colour, 2)
+        cv2.putText(display, debug1, (x, y + h + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 0, 0), 2)
+        cv2.putText(display, debug2, (x, y + h + 38),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 0, 0), 2)
+
+    if not detections:
+        cv2.putText(display, "No objects detected", (20, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+    selected_text = "None"
+    if selected_detection is not None:
+        selected_text = (
+            f"ID {selected_detection['id']} "
+            f"{selected_detection['colour']} {selected_detection['bin_shape']} "
+            f"{selected_detection['pickup_zone']}"
+        )
+
+    cv2.putText(display, f"Selected: {selected_text}", (20, FRAME_HEIGHT - 50),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+    cv2.putText(display, "1-9 select  c=colour  p=shape  h=home  q=quit", (20, FRAME_HEIGHT - 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
     cv2.imshow("Colour and Shape Sorting", display)
     key = cv2.waitKey(1) & 0xFF
 
-    if key == ord("s"):
-        if last_colour != "UNKNOWN" and last_shape != "UNKNOWN":
-            # Choose one of these approaches:
-
-            # Sort by colour only:
-            # send_command(f"PICK_COLOR {last_colour}")
-
-            # Sort by shape only:
-            # send_command(f"PICK_SHAPE {last_shape}")
-
-            # Sort using both:
-            send_command(f"PICK_BOTH {last_colour} {last_shape}")
+    if ord("1") <= key <= ord("9"):
+        selected_object_id = key - ord("0")
+        if selected_object_id <= len(detections):
+            selected_detection = next((d for d in detections if d["id"] == selected_object_id), None)
+            if selected_detection is not None:
+                add_log(
+                    f"Selected object {selected_object_id}: "
+                    f"{selected_detection['colour']} {selected_detection['bin_shape']} "
+                    f"(raw={selected_detection['raw_shape']}, zone={selected_detection['pickup_zone']})"
+                )
         else:
-            print("No valid object detected to sort")
+            add_log(f"No object with ID {selected_object_id}")
+            selected_object_id = None
+
+    elif key == ord("c"):
+        if selected_detection is not None and selected_detection["valid"]:
+            send_command(
+                ser,
+                f"PICK_COLOR_AT {selected_detection['colour']} {selected_detection['pickup_zone']}",
+                detected_colour=selected_detection["colour"],
+                detected_shape=selected_detection["bin_shape"],
+                object_id=selected_detection["id"],
+                pickup_zone=selected_detection["pickup_zone"]
+            )
+        else:
+            add_log("No valid selected object to sort by colour")
+
+    elif key == ord("p"):
+        if selected_detection is not None and selected_detection["valid"]:
+            send_command(
+                ser,
+                f"PICK_SHAPE_AT {selected_detection['raw_shape']} {selected_detection['pickup_zone']}",
+                detected_colour=selected_detection["colour"],
+                detected_shape=selected_detection["bin_shape"],
+                object_id=selected_detection["id"],
+                pickup_zone=selected_detection["pickup_zone"]
+            )
+        else:
+            add_log("No valid selected object to sort by shape")
 
     elif key == ord("h"):
-        send_command("HOME")
+        send_command(ser, "HOME")
 
     elif key == ord("q"):
+        add_log("Quitting program")
         break
 
 cap.release()
