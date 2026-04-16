@@ -1,1 +1,94 @@
 # robotictask2
+
+By Daniel and Ihtasham
+
+Required Parts:
+1 X Arduino Uno or Arduino Mega
+1 X Raspberry Pi 5 or Pi 4
+1 X WebCam
+1 X Mini Breadboard
+4 X MG995 or MG996R Servo
+3 X MG90S Servo
+1 X KCD1 Rocker Switch
+1 X 608 Bearing
+2 X 6203 Bearing
+Various M3 Bolts (6mm, 10mm, 14mm) and Jumper Cables
+5V Power Supply (Recommended: 5V 10A)
+
+Arduino Test Commands in Serial Monitor:
+Gripper Only
+OPEN
+CLOSE
+OPEN
+CLOSE
+
+Pickup Zone
+PICK_ZONE_TEST LEFT
+PICK_ZONE_TEST CENTER
+PICK_ZONE_TEST RIGHT
+
+Pick + Grip
+PICK_ZONE_CLOSE_TEST LEFT
+PICK_ZONE_CLOSE_TEST CENTER
+PICK_ZONE_CLOSE_TEST RIGHT
+
+Pick + Grip + Lift
+PICK_ZONE_LIFT_TEST LEFT
+PICK_ZONE_LIFT_TEST CENTER
+PICK_ZONE_LIFT_TEST RIGHT
+
+Pick Up Test
+PICK_TEST
+
+Pick + Drop
+PICK_TEST_DROP
+
+Colour Bin
+PICK_COLOR_AT RED LEFT
+PICK_COLOR_AT RED CENTER
+PICK_COLOR_AT RED RIGHT
+PICK_COLOR_AT BLUE LEFT
+PICK_COLOR_AT BLUE CENTER
+PICK_COLOR_AT BLUE RIGHT
+
+Shape Bin
+PICK_SHAPE_AT CIRCLE LEFT
+PICK_SHAPE_AT CIRCLE CENTER
+PICK_SHAPE_AT CIRCLE RIGHT
+PICK_SHAPE_AT RECTANGLE LEFT
+PICK_SHAPE_AT RECTANGLE CENTER
+PICK_SHAPE_AT RECTANGLE RIGHT
+
+Quick Tests
+HOME
+OPEN
+CLOSE
+PICK_ZONE_TEST LEFT
+PICK_ZONE_TEST CENTER
+PICK_ZONE_TEST RIGHT
+PICK_TEST
+PICK_TEST_DROP
+PICK_COLOR_AT RED CENTER
+PICK_COLOR_AT BLUE CENTER
+PICK_SHAPE_AT CIRCLE CENTER
+PICK_SHAPE_AT RECTANGLE CENTER
+
+Raspberry Pi Test Commands:
+
+Press CENTER Object ID number 
+Press C to Sort by Colour
+
+Press LEFT Object ID number 
+Press C to Sort by Colour
+
+Press RIGHT Object ID number 
+Press C to Sort by Colour
+
+Press Center Object ID number 
+Press P to Sort by Shape
+
+Press LEFT Object ID number 
+Press P to Sort by Shape
+
+Press RIGHT Object ID number 
+Press P to Sort by Shape
