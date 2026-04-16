@@ -20,15 +20,15 @@ const int PIN_GRIPPER        = 11;
 
 // Current servo positions
 int posBase = 90;
-int posShoulder = 90;
-int posElbow = 90;
+int posShoulder = 165;
+int posElbow = 160;
 int posWristRoll = 90;
 int posWristRotate = 90;
 int posGripper = 80;
 
 // Home position
 const int HOME_BASE         = 90;
-const int HOME_SHOULDER     = 70;
+const int HOME_SHOULDER     = 165;
 const int HOME_ELBOW        = 160;
 const int HOME_WRIST_ROLL   = 90;
 const int HOME_WRIST_ROTATE = 90;
@@ -38,37 +38,47 @@ const int HOME_GRIPPER      = 80;
 // 3 pickup zones
 // Tune these first
 // ---------------------------------
-const int PICK_LEFT_BASE      = 60;
+const int PICK_LEFT_BASE      = 72;
 const int PICK_CENTER_BASE    = 90;
-const int PICK_RIGHT_BASE     = 120;
+const int PICK_RIGHT_BASE     = 108;
 
-const int PICK_SHOULDER       = 0;
-const int PICK_ELBOW          = 150;
-const int PICK_WRIST_ROLL     = 90;
+const int PICK_SHOULDER       = 90;
+const int PICK_ELBOW          = 140;
+const int PICK_WRIST_ROLL     = 135;
 const int PICK_WRIST_ROTATE   = 90;
-const int PICK_GRIPPER_OPEN   = 80;
-const int PICK_GRIPPER_CLOSED = 45;
+const int PICK_GRIPPER_OPEN   = 0;
+const int PICK_GRIPPER_CLOSED = 180;
 
-// Slightly raised pickup pose after gripping
-const int LIFT_SHOULDER = 105;
-const int LIFT_ELBOW    = 110;
+// Pre-pick position: slightly above the object
+const int PRE_PICK_SHOULDER   = 98;
+const int PRE_PICK_ELBOW      = 147;
+
+// Mid-lift position: between pickup and home
+const int LIFT_SHOULDER = 140;
+const int LIFT_ELBOW    = 154;
 
 // 4 output bins
-const int BIN_RED_BASE     = 35;
-const int BIN_BLUE_BASE    = 145;
-const int BIN_CUBE_BASE    = 35;
-const int BIN_SPHERE_BASE  = 145;
+const int BIN_RED_BASE     = 0;
+const int BIN_BLUE_BASE    = 180;
+const int BIN_CUBE_BASE    = 20;
+const int BIN_SPHERE_BASE  = 165;
 
 // PICK_BOTH behaviour:
 // true  = sort into RED / BLUE bins
 // false = sort into CUBE / SPHERE bins
 const bool SORT_BY_COLOUR = true;
 
+// Movement speeds (higher = slower)
+const int SPEED_NORMAL = 12;
+const int SPEED_PICKUP_APPROACH = 28;
+const int SPEED_GRIPPER = 16;
+const int SPEED_LIFT = 16;
+
 // Serial buffer
 String inputLine = "";
 
 // Set to true if one shoulder servo is mirrored mechanically
-const bool INVERT_SHOULDER_2 = false;
+const bool INVERT_SHOULDER_2 = true;
 
 // ----------------------------
 // Helper functions
@@ -169,7 +179,7 @@ void goHome() {
     HOME_WRIST_ROLL,
     HOME_WRIST_ROTATE,
     HOME_GRIPPER,
-    12
+    SPEED_NORMAL
   );
 }
 
@@ -181,7 +191,7 @@ void openGripper() {
     posWristRoll,
     posWristRotate,
     PICK_GRIPPER_OPEN,
-    10
+    SPEED_GRIPPER
   );
 }
 
@@ -193,13 +203,25 @@ void closeGripper() {
     posWristRoll,
     posWristRotate,
     PICK_GRIPPER_CLOSED,
-    10
+    SPEED_GRIPPER
   );
 }
 
 void moveToPickupZone(String zone) {
   int targetBase = getPickupBaseForZone(zone);
 
+  // Stage 1: move to a point just above the object
+  moveAllSmooth(
+    targetBase,
+    PRE_PICK_SHOULDER,
+    PRE_PICK_ELBOW,
+    PICK_WRIST_ROLL,
+    PICK_WRIST_ROTATE,
+    PICK_GRIPPER_OPEN,
+    SPEED_NORMAL
+  );
+
+  // Stage 2: slowly lower onto the object
   moveAllSmooth(
     targetBase,
     PICK_SHOULDER,
@@ -207,7 +229,7 @@ void moveToPickupZone(String zone) {
     PICK_WRIST_ROLL,
     PICK_WRIST_ROTATE,
     PICK_GRIPPER_OPEN,
-    12
+    SPEED_PICKUP_APPROACH
   );
 }
 
@@ -219,7 +241,7 @@ void liftObject() {
     posWristRoll,
     posWristRotate,
     posGripper,
-    12
+    SPEED_LIFT
   );
 }
 
@@ -231,7 +253,7 @@ void moveToDropPosition(int targetBase) {
     90,
     90,
     posGripper,
-    12
+    SPEED_NORMAL
   );
 
   moveAllSmooth(
@@ -241,7 +263,7 @@ void moveToDropPosition(int targetBase) {
     90,
     90,
     posGripper,
-    12
+    SPEED_NORMAL
   );
 }
 
@@ -276,6 +298,7 @@ void moveToShapeBin(String shape) {
 }
 
 void dropObject() {
+  Serial.println("EVENT DROP_START");
   openGripper();
   delay(300);
 
@@ -286,18 +309,20 @@ void dropObject() {
     90,
     90,
     PICK_GRIPPER_OPEN,
-    12
+    SPEED_NORMAL
   );
+
+  Serial.println("EVENT DROPPED_OFF");
 }
 
 void pickObjectFromZone(String zone) {
   Serial.println("EVENT PICKUP_START " + zone);
   moveToPickupZone(zone);
-  delay(300);
+  delay(400);
   closeGripper();
-  delay(300);
+  delay(500);
   liftObject();
-  delay(300);
+  delay(400);
   Serial.println("EVENT PICKED_UP " + zone);
 }
 
@@ -327,9 +352,20 @@ void processCommand(String cmd) {
   }
 
   if (cmd == "PICK_TEST") {
+    Serial.println("PICK_TEST_START");
     pickObjectFromZone("CENTER");
     goHome();
-    Serial.println("DONE PICK_TEST");
+    Serial.println("DONE PICK_TEST_HOLDING_OBJECT");
+    return;
+  }
+
+  if (cmd == "PICK_TEST_DROP") {
+    Serial.println("PICK_TEST_DROP_START");
+    pickObjectFromZone("CENTER");
+    moveToColourBin("RED");
+    dropObject();
+    goHome();
+    Serial.println("DONE PICK_TEST_DROP");
     return;
   }
 
