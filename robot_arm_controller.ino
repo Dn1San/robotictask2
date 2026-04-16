@@ -34,14 +34,12 @@ const int HOME_WRIST_ROLL   = 90;
 const int HOME_WRIST_ROTATE = 90;
 const int HOME_GRIPPER      = 80;
 
-// ---------------------------------
 // 3 pickup zones
-// Tune these first
-// ---------------------------------
 const int PICK_LEFT_BASE      = 72;
 const int PICK_CENTER_BASE    = 90;
 const int PICK_RIGHT_BASE     = 108;
 
+// Pickup position: where the gripper is closed around the object
 const int PICK_SHOULDER       = 90;
 const int PICK_ELBOW          = 140;
 const int PICK_WRIST_ROLL     = 135;
@@ -80,9 +78,7 @@ String inputLine = "";
 // Set to true if one shoulder servo is mirrored mechanically
 const bool INVERT_SHOULDER_2 = true;
 
-// ----------------------------
 // Helper functions
-// ----------------------------
 int clampAngle(int angle) {
   if (angle < 0) return 0;
   if (angle > 180) return 180;
@@ -210,7 +206,7 @@ void closeGripper() {
 void moveToPickupZone(String zone) {
   int targetBase = getPickupBaseForZone(zone);
 
-  // Stage 1: move to a point just above the object
+  //move to a point just above the object
   moveAllSmooth(
     targetBase,
     PRE_PICK_SHOULDER,
@@ -221,7 +217,7 @@ void moveToPickupZone(String zone) {
     SPEED_NORMAL
   );
 
-  // Stage 2: slowly lower onto the object
+  //slowly lower onto the object
   moveAllSmooth(
     targetBase,
     PICK_SHOULDER,
@@ -326,9 +322,7 @@ void pickObjectFromZone(String zone) {
   Serial.println("EVENT PICKED_UP " + zone);
 }
 
-// ----------------------------
 // Serial command processing
-// ----------------------------
 void processCommand(String cmd) {
   cmd.trim();
   cmd.toUpperCase();
@@ -505,7 +499,7 @@ void processCommand(String cmd) {
     return;
   }
 
-  // old commands still supported for compatibility
+  // old commands
   if (cmd.startsWith("PICK_COLOR ")) {
     String colour = cmd.substring(11);
     colour.trim();
@@ -586,9 +580,7 @@ void processCommand(String cmd) {
   Serial.println("ERROR UNKNOWN_COMMAND");
 }
 
-// ----------------------------
 // Setup / loop
-// ----------------------------
 void setup() {
   Serial.begin(115200);
 

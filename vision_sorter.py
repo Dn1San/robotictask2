@@ -5,22 +5,16 @@ import time
 from datetime import datetime
 from copy import deepcopy
 
-# ----------------------------
 # Serial config
-# ----------------------------
 SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
 
-# ----------------------------
 # Camera config
-# ----------------------------
 CAMERA_INDEX = 0
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
 
-# ----------------------------
 # Detection thresholds
-# ----------------------------
 MIN_CONTOUR_AREA = 1500
 MAX_SELECTABLE_OBJECTS = 9
 
@@ -32,17 +26,19 @@ def add_log(message: str) -> None:
 
 def connect_to_arduino():
     try:
+        # Connect to Arduino and test communication
         add_log(f"Opening serial on {SERIAL_PORT} at {BAUD_RATE} baud")
         ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
 
         time.sleep(2)
         ser.reset_input_buffer()
         ser.reset_output_buffer()
-
+        
         add_log("Testing Arduino connection")
         ser.write(b"HOME\n")
         time.sleep(1)
 
+        # Read any responses for a short period to confirm communication
         replies = []
         start_time = time.time()
         while time.time() - start_time < 2:
@@ -58,7 +54,7 @@ def connect_to_arduino():
             add_log("WARNING: No reply from Arduino")
 
         return ser
-
+    # Catch Error if Arduino is not connected or serial port is unavailable
     except Exception as e:
         raise RuntimeError(f"Failed to connect to Arduino: {e}")
 
@@ -67,9 +63,11 @@ def send_command(ser, command: str, detected_colour="UNKNOWN", detected_shape="U
                  snapshot_label=None, pickup_zone="UNKNOWN") -> None:
     add_log(f"Sending command: {command}")
 
+    # Log the detected object details for pickup commands
     if snapshot_label is not None:
         add_log(f"Using frozen selection: {snapshot_label}")
 
+    # PICK_COLOR_AT and PICK_SHAPE_AT
     if command.startswith("PICK_COLOR_AT"):
         add_log(
             f"Detected object snapshot: colour={detected_colour}, shape={detected_shape}, zone={pickup_zone}"
@@ -86,6 +84,7 @@ def send_command(ser, command: str, detected_colour="UNKNOWN", detected_shape="U
     ser.write((command + "\n").encode("utf-8"))
     time.sleep(0.5)
 
+    # Read responses for a short period to confirm command execution
     responses = []
     start_time = time.time()
     while time.time() - start_time < 8:
@@ -126,6 +125,7 @@ def get_colour_masks(hsv_frame):
     kernel = np.ones((5, 5), np.uint8)
     masks = {}
 
+    # Combine multiple ranges for each colour 
     for colour_name, ranges in colour_ranges.items():
         combined_mask = None
 
@@ -161,11 +161,12 @@ def detect_shape(contour):
 
     approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
     vertices = len(approx)
-
+    # Calculate aspect ratio and circularity for better shape classification
     x, y, w, h = cv2.boundingRect(approx)
     aspect_ratio = w / float(h)
     circularity = (4 * np.pi * area) / (perimeter * perimeter)
-
+    
+    # Classify shapes based on vertices, aspect ratio, and circularity
     if vertices == 3:
         return "TRIANGLE", vertices, circularity
 
@@ -217,9 +218,10 @@ def detect_multiple_objects(hsv_frame):
     masks = get_colour_masks(hsv_frame)
     detections = []
 
+    # Process each colour mask and extract object details
     for colour_name, mask in masks.items():
         contours = get_valid_contours_from_mask(mask)
-
+        
         for contour in contours:
             raw_shape, vertices, circularity = detect_shape(contour)
             bin_shape = map_shape_to_bin_shape(raw_shape)
@@ -257,14 +259,10 @@ def detect_multiple_objects(hsv_frame):
     return detections[:MAX_SELECTABLE_OBJECTS]
 
 
-# ----------------------------
 # Connect to Arduino
-# ----------------------------
 ser = connect_to_arduino()
 
-# ----------------------------
 # Open camera
-# ----------------------------
 cap = cv2.VideoCapture(CAMERA_INDEX)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
@@ -315,7 +313,7 @@ while True:
         pickup_zone = det["pickup_zone"]
         display_id = det["display_id"]
 
-        # highlight the live detection that matches the frozen snapshot best visually
+        # highlight the live detection that matches the frozen snapshot 
         is_selected_like = False
         if selected_snapshot is not None:
             sx, sy = selected_snapshot["center"]
