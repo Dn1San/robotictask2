@@ -3,11 +3,12 @@ import numpy as np
 import serial
 import time
 from datetime import datetime
+from copy import deepcopy
 
 # ----------------------------
 # Serial config
 # ----------------------------
-SERIAL_PORT = "/dev/ttyACM1"
+SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
 
 # ----------------------------
@@ -63,20 +64,20 @@ def connect_to_arduino():
 
 
 def send_command(ser, command: str, detected_colour="UNKNOWN", detected_shape="UNKNOWN",
-                 object_id=None, pickup_zone="UNKNOWN") -> None:
+                 snapshot_label=None, pickup_zone="UNKNOWN") -> None:
     add_log(f"Sending command: {command}")
 
-    if object_id is not None:
-        add_log(f"Selected object ID: {object_id}")
+    if snapshot_label is not None:
+        add_log(f"Using frozen selection: {snapshot_label}")
 
     if command.startswith("PICK_COLOR_AT"):
         add_log(
-            f"Detected object: colour={detected_colour}, shape={detected_shape}, zone={pickup_zone}"
+            f"Detected object snapshot: colour={detected_colour}, shape={detected_shape}, zone={pickup_zone}"
         )
         add_log("Pickup started")
     elif command.startswith("PICK_SHAPE_AT"):
         add_log(
-            f"Detected object: colour={detected_colour}, shape={detected_shape}, zone={pickup_zone}"
+            f"Detected object snapshot: colour={detected_colour}, shape={detected_shape}, zone={pickup_zone}"
         )
         add_log("Pickup started")
     elif command == "HOME":
@@ -250,10 +251,10 @@ def detect_multiple_objects(hsv_frame):
 
     detections.sort(key=lambda d: d["area"], reverse=True)
 
-    for idx, det in enumerate(detections, start=1):
-        det["id"] = idx
+    for idx, det in enumerate(detections[:MAX_SELECTABLE_OBJECTS], start=1):
+        det["display_id"] = idx
 
-    return detections
+    return detections[:MAX_SELECTABLE_OBJECTS]
 
 
 # ----------------------------
@@ -272,11 +273,10 @@ if not cap.isOpened():
     raise RuntimeError("Could not open webcam")
 
 add_log("Camera opened successfully")
-add_log("Controls: 1-9 select object, c=sort by colour, p=shape, h=home, q=quit")
+add_log("Controls: 1-9 select object snapshot, c=sort by colour, p=sort by shape, h=home, x=clear, q=quit")
 add_log("Pickup zones: LEFT / CENTER / RIGHT")
 
-selected_object_id = None
-selected_detection = None
+selected_snapshot = None  # frozen object snapshot
 
 while True:
     ret, frame = cap.read()
@@ -288,13 +288,6 @@ while True:
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
     detections = detect_multiple_objects(hsv)
-
-    selected_detection = None
-    if selected_object_id is not None:
-        for det in detections:
-            if det["id"] == selected_object_id:
-                selected_detection = det
-                break
 
     # Draw vertical zone guides
     left_boundary = FRAME_WIDTH // 3
@@ -309,27 +302,33 @@ while True:
     cv2.putText(display, "RIGHT", (FRAME_WIDTH - 90, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
 
-    # Draw detections
-    for det in detections[:MAX_SELECTABLE_OBJECTS]:
+    # Draw live detections
+    for det in detections:
         x, y, w, h = det["bbox"]
         centre_x, centre_y = det["center"]
         colour = det["colour"]
         bin_shape = det["bin_shape"]
         raw_shape = det["raw_shape"]
-        area = det["area"]
         vertices = det["vertices"]
         circularity = det["circularity"]
         avg_hue = det["avg_hue"]
         pickup_zone = det["pickup_zone"]
-        object_id = det["id"]
-        is_selected = (selected_object_id == object_id)
+        display_id = det["display_id"]
 
-        box_colour = (0, 255, 255) if is_selected else (0, 255, 0)
+        # highlight the live detection that matches the frozen snapshot best visually
+        is_selected_like = False
+        if selected_snapshot is not None:
+            sx, sy = selected_snapshot["center"]
+            if abs(centre_x - sx) < 25 and abs(centre_y - sy) < 25:
+                is_selected_like = True
+
+        box_colour = (0, 255, 255) if is_selected_like else (0, 255, 0)
+
         cv2.drawContours(display, [det["contour"]], -1, box_colour, 2)
         cv2.rectangle(display, (x, y), (x + w, y + h), box_colour, 2)
         cv2.circle(display, (centre_x, centre_y), 4, box_colour, -1)
 
-        label = f"ID:{object_id} {colour} {bin_shape}"
+        label = f"ID:{display_id} {colour} {bin_shape}"
         debug1 = f"Zone:{pickup_zone} Raw:{raw_shape}"
         debug2 = f"V:{vertices} C:{circularity:.2f} Hue:{avg_hue:.1f}"
 
@@ -345,60 +344,75 @@ while True:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
     selected_text = "None"
-    if selected_detection is not None:
+    if selected_snapshot is not None:
         selected_text = (
-            f"ID {selected_detection['id']} "
-            f"{selected_detection['colour']} {selected_detection['bin_shape']} "
-            f"{selected_detection['pickup_zone']}"
+            f"{selected_snapshot['colour']} "
+            f"{selected_snapshot['bin_shape']} "
+            f"{selected_snapshot['pickup_zone']}"
         )
 
-    cv2.putText(display, f"Selected: {selected_text}", (20, FRAME_HEIGHT - 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-    cv2.putText(display, "1-9 select  c=colour  p=shape  h=home  q=quit", (20, FRAME_HEIGHT - 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+    cv2.putText(display, f"Frozen selection: {selected_text}", (20, FRAME_HEIGHT - 50),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 255), 2)
+    cv2.putText(display, "1-9 snapshot  c=colour  p=shape  h=home  x=clear  q=quit", (20, FRAME_HEIGHT - 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2)
 
     cv2.imshow("Colour and Shape Sorting", display)
     key = cv2.waitKey(1) & 0xFF
 
+    # Freeze current detection as snapshot
     if ord("1") <= key <= ord("9"):
-        selected_object_id = key - ord("0")
-        if selected_object_id <= len(detections):
-            selected_detection = next((d for d in detections if d["id"] == selected_object_id), None)
-            if selected_detection is not None:
-                add_log(
-                    f"Selected object {selected_object_id}: "
-                    f"{selected_detection['colour']} {selected_detection['bin_shape']} "
-                    f"(raw={selected_detection['raw_shape']}, zone={selected_detection['pickup_zone']})"
-                )
+        requested_id = key - ord("0")
+        chosen = next((d for d in detections if d["display_id"] == requested_id), None)
+
+        if chosen is not None:
+            selected_snapshot = {
+                "display_id": chosen["display_id"],
+                "colour": chosen["colour"],
+                "raw_shape": chosen["raw_shape"],
+                "bin_shape": chosen["bin_shape"],
+                "pickup_zone": chosen["pickup_zone"],
+                "center": chosen["center"],
+                "bbox": chosen["bbox"],
+                "valid": chosen["valid"],
+            }
+
+            add_log(
+                f"Frozen selection from live ID {requested_id}: "
+                f"{selected_snapshot['colour']} {selected_snapshot['bin_shape']} "
+                f"(raw={selected_snapshot['raw_shape']}, zone={selected_snapshot['pickup_zone']})"
+            )
         else:
-            add_log(f"No object with ID {selected_object_id}")
-            selected_object_id = None
+            add_log(f"No object with live ID {requested_id}")
+
+    elif key == ord("x"):
+        selected_snapshot = None
+        add_log("Cleared frozen selection")
 
     elif key == ord("c"):
-        if selected_detection is not None and selected_detection["valid"]:
+        if selected_snapshot is not None and selected_snapshot["valid"]:
             send_command(
                 ser,
-                f"PICK_COLOR_AT {selected_detection['colour']} {selected_detection['pickup_zone']}",
-                detected_colour=selected_detection["colour"],
-                detected_shape=selected_detection["bin_shape"],
-                object_id=selected_detection["id"],
-                pickup_zone=selected_detection["pickup_zone"]
+                f"PICK_COLOR_AT {selected_snapshot['colour']} {selected_snapshot['pickup_zone']}",
+                detected_colour=selected_snapshot["colour"],
+                detected_shape=selected_snapshot["bin_shape"],
+                snapshot_label=f"ID {selected_snapshot['display_id']}",
+                pickup_zone=selected_snapshot["pickup_zone"]
             )
         else:
-            add_log("No valid selected object to sort by colour")
+            add_log("No valid frozen selection to sort by colour")
 
     elif key == ord("p"):
-        if selected_detection is not None and selected_detection["valid"]:
+        if selected_snapshot is not None and selected_snapshot["valid"]:
             send_command(
                 ser,
-                f"PICK_SHAPE_AT {selected_detection['raw_shape']} {selected_detection['pickup_zone']}",
-                detected_colour=selected_detection["colour"],
-                detected_shape=selected_detection["bin_shape"],
-                object_id=selected_detection["id"],
-                pickup_zone=selected_detection["pickup_zone"]
+                f"PICK_SHAPE_AT {selected_snapshot['raw_shape']} {selected_snapshot['pickup_zone']}",
+                detected_colour=selected_snapshot["colour"],
+                detected_shape=selected_snapshot["bin_shape"],
+                snapshot_label=f"ID {selected_snapshot['display_id']}",
+                pickup_zone=selected_snapshot["pickup_zone"]
             )
         else:
-            add_log("No valid selected object to sort by shape")
+            add_log("No valid frozen selection to sort by shape")
 
     elif key == ord("h"):
         send_command(ser, "HOME")
